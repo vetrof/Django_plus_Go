@@ -2,6 +2,9 @@ services:
   web:
     build: .
     command: python manage.py runserver 0.0.0.0:8000
+#    command: gunicorn --log-level debug _settings.wsgi:application --bind 0.0.0.0:8000 --reload
+
+
     env_file:
       - ./.env
     volumes:
@@ -21,6 +24,18 @@ services:
     restart: always
     ports:
       - 5432:5432
+
+  go_service:
+    build:
+      context: ./go_service
+    ports:
+      - "8080:8080"
+    env_file:
+      - ./.env
+    depends_on:
+      - db
+    restart: always
+
 
 volumes:
   postgres_volume:

@@ -1,57 +1,48 @@
 package main
 
 import (
-	"fmt"
+	"context"
+	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"log"
 	"net/http"
 	"os"
-
-	"context"
-	"github.com/gin-gonic/gin"
+	"sync"
 )
 
-type Shop struct {
-	ID        int     `json:"id"`
-	ShopID    string  `json:"shop_id"`
-	Title     string  `json:"title"`
-	City      string  `json:"city"`
-	Address   string  `json:"address"`
-	Enabled   bool    `json:"enabled"`
-	Latitude  float64 `json:"latitude"`
-	Longitude float64 `json:"longitude"`
-	Points    string  `json:"points"`
+type Product struct {
+	ID          int
+	Name        string
+	Description string
+	Price       int
+}
+
+// Инициализация пула соединений
+var pool *pgxpool.Pool
+
+// Инициализация базы данных
+func initDB() {
+	dsn := "postgres://test_user:QWErty42@db:5432/test_pgdb"
+	var err error
+	// Создаем пул соединений
+	pool, err = pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		log.Fatalf("Unable to create connection pool: %v", err)
+	}
 }
 
 func getShopsHandler(c *gin.Context) {
-	// Формируем строку подключения из ENV
-	host := os.Getenv("POSTGRES_HOST")
-	port := os.Getenv("POSTGRES_PORT")
-	user := os.Getenv("POSTGRES_USER")
-	password := os.Getenv("POSTGRES_PASSWORD")
-	dbname := os.Getenv("POSTGRES_DB")
-
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s", user, password, host, port, dbname)
-
-	// Логируем строку подключения
-	log.Printf("Connecting to database with DSN: %s", dsn)
-
-	// Подключение к базе данных
-	conn, err := pgx.Connect(context.Background(), dsn)
+	// Пытаемся получить соединение из пула
+	conn, err := pool.Acquire(context.Background())
 	if err != nil {
-		log.Printf("Unable to connect to database: %v\n", err)
+		log.Printf("Failed to acquire connection: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database connection failed"})
 		return
 	}
-	defer conn.Close(context.Background())
+	defer conn.Release()
 
-	// Выполнение SQL-запроса с JOIN для получения информации о городе
-	log.Println("Executing query to fetch shops with city...")
-	rows, err := conn.Query(context.Background(), `
-        SELECT shop.shop_id, shop.title, city.name AS city, shop.address,
-               shop.enabled, shop.latitude, shop.longitude, shop.points
-        FROM catalog_shop shop
-        JOIN catalog_city city ON shop.city_id = city.id
-    `)
+	// Выполнение SQL-запроса
+	rows, err := conn.Query(context.Background(), "SELECT * FROM catalog_catalog")
 	if err != nil {
 		log.Printf("Query failed: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Query failed"})
@@ -59,38 +50,60 @@ func getShopsHandler(c *gin.Context) {
 	}
 	defer rows.Close()
 
-	// Чтение данных
-	var shops []Shop
+	// Создаем WaitGroup для ожидания завершения горутин
+	var wg sync.WaitGroup
+	var mu sync.Mutex // Защита от гонок данных
+	var products []Product
+
+	// Обработка строк из результата запроса в горутинах
 	for rows.Next() {
-		var shop Shop
-		err = rows.Scan(&shop.ShopID, &shop.Title, &shop.City, &shop.Address, &shop.Enabled, &shop.Latitude, &shop.Longitude, &shop.Points)
-		if err != nil {
-			log.Printf("Failed to scan row: %v\n", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan row"})
-			return
-		}
-		log.Printf("Fetched shop: %+v", shop) // Логируем информацию о каждом магазине
-		shops = append(shops, shop)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var product Product
+			err := rows.Scan(&product.ID, &product.Name, &product.Description, &product.Price)
+			if err != nil {
+				log.Printf("Failed to scan row: %v\n", err)
+				return
+			}
+			// Защищаем от гонок при добавлении в срез
+			mu.Lock()
+			products = append(products, product)
+			mu.Unlock()
+		}()
 	}
 
+	// Ожидаем завершения всех горутин
+	wg.Wait()
+
 	// Проверка на отсутствие данных
-	if len(shops) == 0 {
-		log.Println("No shops found.")
-		c.JSON(http.StatusNotFound, gin.H{"error": "No shops found"})
+	if len(products) == 0 {
+		log.Println("No products found.")
+		c.JSON(http.StatusNotFound, gin.H{"error": "No products found"})
 		return
 	}
 
 	// Отправка ответа
-	log.Println("Returning shops data.")
-	c.JSON(http.StatusOK, shops)
+	c.JSON(http.StatusOK, products)
+}
+
+func emptyHandler(c *gin.Context) {
+	// Отправка ответа
+	var products string
+	c.JSON(http.StatusOK, products)
 }
 
 func main() {
+	// Инициализация базы данных
+	initDB()
+
 	// Создание роутера
-	r := gin.Default()
+	gin.SetMode(gin.ReleaseMode)
+	router := gin.Default()
 
 	// Регистрация маршрута
-	r.GET("/shops", getShopsHandler)
+	router.GET("/product", getShopsHandler)
+	router.GET("/empty", emptyHandler)
 
 	// Запуск сервера
 	port := os.Getenv("GO_SERVICE_PORT")
@@ -98,5 +111,5 @@ func main() {
 		port = "8080" // Установите порт по умолчанию
 	}
 	log.Printf("Server running on port %s", port)
-	r.Run(":" + port)
+	router.Run(":" + port)
 }
